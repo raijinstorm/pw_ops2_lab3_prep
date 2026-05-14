@@ -42,7 +42,7 @@ static void handle_client(int cfd, clients_struct_t* clients_struct, int epoll_f
         disconnect_client(cfd, clients_struct, epoll_fd);
         return;
     }
-    if (n == 0) {
+    if (n != BUF_SIZE - 1) {
         disconnect_client(cfd, clients_struct, epoll_fd);
         return;
     }
@@ -205,6 +205,9 @@ int main(int argc, char *argv[])
 
     uint16_t port = (uint16_t)atoi(argv[1]);
     int server_fd = bind_tcp_socket(port, BACKLOG);
+
+    int flags = fcntl(server_fd, F_GETFL) | O_NONBLOCK;
+    fcntl(server_fd, F_SETFL, flags);
 
     doServer(server_fd);
 
