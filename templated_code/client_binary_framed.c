@@ -1,41 +1,77 @@
 // =============================================================================
-// TEMPLATE: LENGTH-PREFIXED BINARY CLIENT
+// TEMPLATE: LINE-BASED TEXT CLIENT
 // -----------------------------------------------------------------------------
-// Sends each command-line message as one framed packet [len][body], then reads
-// the framed reply and prints it. Because the client is sequential (send, wait,
-// read) it can use blocking bulk_read for the reply — read the 1-byte header,
-// then read exactly that many body bytes.
+// Sends each command-line message as:
 //
-// Test:  ./server_binary_framed 9000
-//        ./client_binary_framed localhost 9000 hello "a longer chapter" hi
+//      message\n
+//
+// Then reads one newline-terminated reply and prints it.
+//
+// Protocol examples:
+//      HELLO\n
+//      LAUNCH 123\n
+//      MSG hello world\n
+//
+// Unlike length-prefixed binary messages, here the message ends when '\n'
+// is received.
+//
+// The client is sequential:
+//      send one line
+//      wait for one reply line
+//      print reply
+//
+// Test:
+//      ./server_line 9000
+//      ./client_line localhost 9000 HELLO "LAUNCH 123" "MSG hello world"
 // =============================================================================
+
 #include "common.h"
 
-#define MAX_BODY 255
+#define MAX_LINE 255
 
-static int send_framed(int fd, const unsigned char *body, unsigned char len)
+static int send_line(int fd, const char *line)
 {
-    unsigned char frame[1 + MAX_BODY];
-    frame[0] = len;
-    if (len)
-        memcpy(frame + 1, body, len);
-    return bulk_write(fd, (char *)frame, (size_t)1 + len) < 0 ? -1 : 0;
+    char out[MAX_LINE + 2];
+
+    int n = snprintf(out, sizeof(out), "%s\n", line);
+
+    if (n < 0)
+        return -1;
+
+    return bulk_write(fd, out, (size_t)n) < 0 ? -1 : 0;
 }
 
-// Read one framed message into body (capacity MAX_BODY). Returns body length,
-// or -1 on EOF/error.
-static int read_framed(int fd, unsigned char *body)
+// Read one newline-terminated line.
+// Returns line length, or -1 on EOF/error.
+// The returned line does NOT include '\n'.
+static int read_line(int fd, char *line)
 {
-    unsigned char len;
-    ssize_t n = bulk_read(fd, (char *)&len, 1);
-    if (n != 1)
-        return -1;
-    if (len == 0)
-        return 0;
-    n = bulk_read(fd, (char *)body, len);
-    if (n != (ssize_t)len)
-        return -1;
-    return len;
+    size_t len = 0;
+
+    while (len < MAX_LINE)
+    {
+        char ch;
+
+        ssize_t n = TEMP_FAILURE_RETRY(read(fd, &ch, 1));
+
+        if (n < 0)
+            return -1;
+
+        if (n == 0)
+            return -1;
+
+        if (ch == '\n')
+        {
+            line[len] = '\0';
+            return (int)len;
+        }
+
+        line[len++] = ch;
+    }
+
+    // line too long
+    line[MAX_LINE] = '\0';
+    return -1;
 }
 
 void usage(char *name)
@@ -48,6 +84,7 @@ int main(int argc, char **argv)
 {
     if (argc < 4)
         usage(argv[0]);
+
     if (sethandler(SIG_IGN, SIGPIPE))
         ERR("sethandler SIGPIPE");
 
@@ -55,23 +92,28 @@ int main(int argc, char **argv)
 
     for (int i = 3; i < argc; i++)
     {
-        size_t len = strlen(argv[i]);
-        if (len > MAX_BODY)
-            len = MAX_BODY;  // a single frame's body maxes out at 255 bytes
-        if (send_framed(sock, (const unsigned char *)argv[i], (unsigned char)len) < 0)
-            ERR("send_framed");
+        char msg[MAX_LINE + 1];
 
-        unsigned char body[MAX_BODY];
-        int rlen = read_framed(sock, body);
+        snprintf(msg, sizeof(msg), "%s", argv[i]);
+
+        if (send_line(sock, msg) < 0)
+            ERR("send_line");
+
+        char reply[MAX_LINE + 1];
+
+        int rlen = read_line(sock, reply);
+
         if (rlen < 0)
         {
-            fprintf(stderr, "server closed the connection\n");
+            fprintf(stderr, "server closed the connection or sent invalid line\n");
             break;
         }
-        printf("reply (len=%d): %.*s\n", rlen, rlen, body);
+
+        printf("reply (len=%d): %s\n", rlen, reply);
     }
 
     if (TEMP_FAILURE_RETRY(close(sock)) < 0)
         ERR("close");
+
     return EXIT_SUCCESS;
 }
